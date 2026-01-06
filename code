@@ -1,0 +1,677 @@
+#include "raylib.h"
+#include <vector>
+#include <stack>
+#include <queue>
+#include <set>
+#include <algorithm>
+#include <random>
+#include <functional>
+#include <ctime>
+#include <cmath>
+
+using namespace std;
+
+// Difficulty modes
+enum Difficulty {
+    EASY = 0,
+    MEDIUM = 1,
+    HARD = 2
+};
+
+// Maze generation algorithms
+enum Algorithm {
+    RECURSIVE_BACKTRACKING = 0,
+    PRIMS = 1,
+    KRUSKALS = 2
+};
+
+// Game modes
+enum GameMode {
+    PLAYER_NAVIGATION = 0,
+    SOLVER_VISUALIZATION = 1
+};
+
+// Constants
+const int MAX_MAZE_SIZE = 50;
+const int CELL_SIZE = 15;
+const int WALL_THICKNESS = 2;
+
+// UI Palette
+constexpr unsigned char ToByte(int value) {
+    return (unsigned char)(value < 0 ? 0 : (value > 255 ? 255 : value));
+}
+
+constexpr Color MakeColor(int r, int g, int b, int a = 255) {
+    return Color{ ToByte(r), ToByte(g), ToByte(b), ToByte(a) };
+}
+
+const Color BG_TOP = MakeColor(12, 17, 28);
+const Color BG_BOTTOM = MakeColor(30, 36, 52);
+const Color PANEL_BG = MakeColor(15, 19, 32, 235);
+const Color PANEL_BORDER = MakeColor(255, 255, 255, 25);
+const Color PANEL_ACCENT = MakeColor(0, 200, 187);
+const Color PANEL_ACCENT_HOVER = MakeColor(70, 240, 228);
+const Color PANEL_TEXT = MakeColor(230, 239, 255);
+const Color PANEL_MUTED = MakeColor(160, 175, 198);
+
+// Difficulty settings
+const int DIFFICULTY_SIZES[3] = { 20, 35, 50 };
+const char* DIFFICULTY_NAMES[3] = { "Easy (20x20)", "Medium (35x35)", "Hard (50x50)" };
+const char* ALGORITHM_NAMES[3] = { "Recursive Backtracking", "Prim's Algorithm", "Kruskal's Algorithm" };
+
+struct Cell {
+    bool visited = false;
+    bool walls[4] = { true, true, true, true }; // Top, Right, Bottom, Left
+    bool inPath = false;
+    bool explored = false;
+};
+
+struct Edge {
+    int x1, y1, x2, y2;
+    int dir; // Direction from (x1,y1) to (x2,y2)
+};
+
+Cell maze[MAX_MAZE_SIZE][MAX_MAZE_SIZE];
+int mazeWidth = 20;
+int mazeHeight = 20;
+int dx[4] = { 0, 1, 0, -1 }; // Right, Down, Left, Up
+int dy[4] = { -1, 0, 1, 0 }; // Top, Right, Bottom, Left
+
+// Game state
+int playerX = 0;
+int playerY = 0;
+Difficulty currentDifficulty = EASY;
+Algorithm currentAlgorithm = RECURSIVE_BACKTRACKING;
+GameMode currentMode = PLAYER_NAVIGATION;
+bool solving = false;
+vector<pair<int, int>> solutionPath;
+vector<pair<int, int>> exploredCells;
+
+float ClampFloat(float value, float minVal, float maxVal) {
+    if (value < minVal) return minVal;
+    if (value > maxVal) return maxVal;
+    return value;
+}
+
+Color LerpColor(Color a, Color b, float t) {
+    t = ClampFloat(t, 0.0f, 1.0f);
+    Color result{};
+    result.r = (unsigned char)(a.r + (b.r - a.r) * t);
+    result.g = (unsigned char)(a.g + (b.g - a.g) * t);
+    result.b = (unsigned char)(a.b + (b.b - a.b) * t);
+    result.a = (unsigned char)(a.a + (b.a - a.a) * t);
+    return result;
+}
+
+bool DrawUIButton(Rectangle bounds, const char* label, bool active, Vector2 mousePos, bool mouseClicked) {
+    bool hovered = CheckCollisionPointRec(mousePos, bounds);
+
+    Color base = active ? PANEL_ACCENT : MakeColor(48, 53, 76, 240);
+    Color hoverCol = active ? PANEL_ACCENT_HOVER : MakeColor(65, 71, 99, 255);
+    Color fill = hovered ? hoverCol : base;
+
+    Rectangle shadow = bounds;
+    shadow.x += 2;
+    shadow.y += 3;
+    DrawRectangleRounded(shadow, 0.25f, 8, MakeColor(0, 0, 0, 120));
+    DrawRectangleRounded(bounds, 0.25f, 8, fill);
+    DrawRectangleRoundedLines(bounds, 0.25f, 8, MakeColor(255, 255, 255, active ? 120 : 40));
+
+    int fontSize = 18;
+    int textWidth = MeasureText(label, fontSize);
+    DrawText(label,
+        (int)(bounds.x + (bounds.width - textWidth) / 2),
+        (int)(bounds.y + bounds.height / 2 - fontSize / 2),
+        fontSize,
+        WHITE);
+
+    return hovered && mouseClicked;
+}
+
+void ResetMaze() {
+    for (int y = 0; y < mazeHeight; y++) {
+        for (int x = 0; x < mazeWidth; x++) {
+            maze[y][x].visited = false;
+            maze[y][x].walls[0] = true;
+            maze[y][x].walls[1] = true;
+            maze[y][x].walls[2] = true;
+            maze[y][x].walls[3] = true;
+            maze[y][x].inPath = false;
+            maze[y][x].explored = false;
+        }
+    }
+    playerX = 0;
+    playerY = 0;
+    solutionPath.clear();
+    exploredCells.clear();
+    solving = false;
+}
+
+bool CanMove(int x, int y, int dir) {
+    if (x < 0 || x >= mazeWidth || y < 0 || y >= mazeHeight) return false;
+    return !maze[y][x].walls[dir];
+}
+
+// Recursive Backtracking Algorithm
+void GenerateRecursiveBacktracking(int startX, int startY) {
+    ResetMaze();
+
+    stack<pair<int, int>> st;
+    st.push({ startX, startY });
+    maze[startY][startX].visited = true;
+
+    while (!st.empty()) {
+        auto [x, y] = st.top();
+
+        vector<int> neighbors;
+        for (int i = 0; i < 4; i++) {
+            int nx = x + dx[i];
+            int ny = y + dy[i];
+
+            if (nx >= 0 && nx < mazeWidth && ny >= 0 && ny < mazeHeight) {
+                if (!maze[ny][nx].visited) {
+                    neighbors.push_back(i);
+                }
+            }
+        }
+
+        if (!neighbors.empty()) {
+            int dir = neighbors[rand() % neighbors.size()];
+            int nx = x + dx[dir];
+            int ny = y + dy[dir];
+
+            maze[y][x].walls[dir] = false;
+            maze[ny][nx].walls[(dir + 2) % 4] = false;
+
+            maze[ny][nx].visited = true;
+            st.push({ nx, ny });
+        }
+        else {
+            st.pop();
+        }
+    }
+}
+
+// Prim's Algorithm
+void GeneratePrims(int startX, int startY) {
+    ResetMaze();
+
+    vector<Edge> walls;
+    set<pair<int, int>> inMaze;
+
+    inMaze.insert({ startX, startY });
+    maze[startY][startX].visited = true;
+
+    // Add initial walls
+    for (int i = 0; i < 4; i++) {
+        int nx = startX + dx[i];
+        int ny = startY + dy[i];
+        if (nx >= 0 && nx < mazeWidth && ny >= 0 && ny < mazeHeight) {
+            walls.push_back({ startX, startY, nx, ny, i });
+        }
+    }
+
+    while (!walls.empty()) {
+        int idx = rand() % walls.size();
+        Edge e = walls[idx];
+        walls.erase(walls.begin() + idx);
+
+        if (inMaze.find({ e.x2, e.y2 }) == inMaze.end()) {
+            // Add cell to maze
+            inMaze.insert({ e.x2, e.y2 });
+            maze[e.y2][e.x2].visited = true;
+
+            // Remove wall
+            maze[e.y1][e.x1].walls[e.dir] = false;
+            maze[e.y2][e.x2].walls[(e.dir + 2) % 4] = false;
+
+            // Add new walls
+            for (int i = 0; i < 4; i++) {
+                int nx = e.x2 + dx[i];
+                int ny = e.y2 + dy[i];
+                if (nx >= 0 && nx < mazeWidth && ny >= 0 && ny < mazeHeight) {
+                    if (inMaze.find({ nx, ny }) == inMaze.end()) {
+                        walls.push_back({ e.x2, e.y2, nx, ny, i });
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Kruskal's Algorithm (simplified)
+void GenerateKruskals(int startX, int startY) {
+    ResetMaze();
+
+    // Create all edges
+    vector<Edge> edges;
+    for (int y = 0; y < mazeHeight; y++) {
+        for (int x = 0; x < mazeWidth; x++) {
+            if (x < mazeWidth - 1) {
+                edges.push_back({ x, y, x + 1, y, 1 }); // Right
+            }
+            if (y < mazeHeight - 1) {
+                edges.push_back({ x, y, x, y + 1, 2 }); // Down
+            }
+        }
+    }
+
+    // Shuffle edges
+    random_device rd;
+    mt19937 g(rd());
+    shuffle(edges.begin(), edges.end(), g);
+
+    // Union-Find structure (simplified)
+    vector<vector<int>> parent(mazeHeight, vector<int>(mazeWidth));
+    for (int y = 0; y < mazeHeight; y++) {
+        for (int x = 0; x < mazeWidth; x++) {
+            parent[y][x] = y * mazeWidth + x;
+        }
+    }
+
+    // Store mazeWidth locally for lambda capture
+    int localMazeWidth = mazeWidth;
+
+    // Find function using iterative path compression
+    function<int(int, int)> find;
+    find = [&parent, &find, localMazeWidth](int x, int y) -> int {
+        int origX = x, origY = y;
+        int root = y * localMazeWidth + x;
+        // Find root
+        while (parent[y][x] != root) {
+            int px = parent[y][x] % localMazeWidth;
+            int py = parent[y][x] / localMazeWidth;
+            root = parent[y][x];
+            x = px;
+            y = py;
+        }
+        // Path compression - update all nodes on path to point to root
+        x = origX;
+        y = origY;
+        while (parent[y][x] != root) {
+            int px = parent[y][x] % localMazeWidth;
+            int py = parent[y][x] / localMazeWidth;
+            parent[y][x] = root;
+            x = px;
+            y = py;
+        }
+        return root;
+        };
+
+    // Union function
+    auto unite = [&parent, &find, localMazeWidth](int x1, int y1, int x2, int y2) -> bool {
+        int p1 = find(x1, y1);
+        int p2 = find(x2, y2);
+        if (p1 != p2) {
+            int px2 = p2 % localMazeWidth;
+            int py2 = p2 / localMazeWidth;
+            parent[py2][px2] = p1;
+            return true;
+        }
+        return false;
+        };
+
+    // Build maze
+    for (const Edge& e : edges) {
+        if (unite(e.x1, e.y1, e.x2, e.y2)) {
+            maze[e.y1][e.x1].walls[e.dir] = false;
+            maze[e.y2][e.x2].walls[(e.dir + 2) % 4] = false;
+        }
+    }
+}
+
+void GenerateMaze() {
+    switch (currentAlgorithm) {
+    case RECURSIVE_BACKTRACKING:
+        GenerateRecursiveBacktracking(0, 0);
+        break;
+    case PRIMS:
+        GeneratePrims(0, 0);
+        break;
+    case KRUSKALS:
+        GenerateKruskals(0, 0);
+        break;
+    }
+}
+
+// A* Pathfinding
+void SolveMaze() {
+    solutionPath.clear();
+    exploredCells.clear();
+
+    for (int y = 0; y < mazeHeight; y++) {
+        for (int x = 0; x < mazeWidth; x++) {
+            maze[y][x].inPath = false;
+            maze[y][x].explored = false;
+        }
+    }
+
+    struct Node {
+        int x, y;
+        int g, h, f;
+        pair<int, int> parent;
+
+        bool operator<(const Node& other) const {
+            return f > other.f; // For priority queue (min heap)
+        }
+    };
+
+    priority_queue<Node> openSet;
+    set<pair<int, int>> closedSet;
+
+    Node start = { 0, 0, 0, 0, 0, { -1, -1 } };
+    int endX = mazeWidth - 1;
+    int endY = mazeHeight - 1;
+
+    start.h = abs(endX - start.x) + abs(endY - start.y);
+    start.f = start.g + start.h;
+
+    openSet.push(start);
+
+    vector<vector<pair<int, int>>> cameFrom(mazeHeight, vector<pair<int, int>>(mazeWidth, { -1, -1 }));
+
+    while (!openSet.empty()) {
+        Node current = openSet.top();
+        openSet.pop();
+
+        if (closedSet.find({ current.x, current.y }) != closedSet.end()) continue;
+        closedSet.insert({ current.x, current.y });
+        exploredCells.push_back({ current.x, current.y });
+        maze[current.y][current.x].explored = true;
+
+        if (current.x == endX && current.y == endY) {
+            // Reconstruct path
+            pair<int, int> node = { endX, endY };
+            while (node.first != -1) {
+                solutionPath.push_back(node);
+                maze[node.second][node.first].inPath = true;
+                node = cameFrom[node.second][node.first];
+            }
+            reverse(solutionPath.begin(), solutionPath.end());
+            return;
+        }
+
+        for (int i = 0; i < 4; i++) {
+            if (!CanMove(current.x, current.y, i)) continue;
+
+            int nx = current.x + dx[i];
+            int ny = current.y + dy[i];
+
+            if (closedSet.find({ nx, ny }) != closedSet.end()) continue;
+
+            int g = current.g + 1;
+            int h = abs(endX - nx) + abs(endY - ny);
+            int f = g + h;
+
+            Node neighbor = { nx, ny, g, h, f, { current.x, current.y } };
+            cameFrom[ny][nx] = { current.x, current.y };
+            openSet.push(neighbor);
+        }
+    }
+}
+
+void UpdatePlayer() {
+    if (IsKeyPressed(KEY_UP) || IsKeyPressed(KEY_W)) {
+        if (CanMove(playerX, playerY, 0)) { // Top
+            playerY--;
+        }
+    }
+    if (IsKeyPressed(KEY_RIGHT) || IsKeyPressed(KEY_D)) {
+        if (CanMove(playerX, playerY, 1)) { // Right
+            playerX++;
+        }
+    }
+    if (IsKeyPressed(KEY_DOWN) || IsKeyPressed(KEY_S)) {
+        if (CanMove(playerX, playerY, 2)) { // Bottom
+            playerY++;
+        }
+    }
+    if (IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_A)) {
+        if (CanMove(playerX, playerY, 3)) { // Left
+            playerX--;
+        }
+    }
+
+    // Check win condition
+    if (playerX == mazeWidth - 1 && playerY == mazeHeight - 1) {
+        // Regenerate on win
+        GenerateMaze();
+    }
+}
+
+void DrawMaze(int offsetX, int offsetY) {
+    // Draw cells
+    for (int y = 0; y < mazeHeight; y++) {
+        for (int x = 0; x < mazeWidth; x++) {
+            int px = offsetX + x * CELL_SIZE;
+            int py = offsetY + y * CELL_SIZE;
+
+            Color cellColor = WHITE;
+            if (maze[y][x].explored && currentMode == SOLVER_VISUALIZATION) {
+                cellColor = MakeColor(200, 220, 255); // Light blue for explored
+            }
+            if (maze[y][x].inPath && currentMode == SOLVER_VISUALIZATION) {
+                cellColor = MakeColor(255, 255, 150); // Yellow for path
+            }
+
+            DrawRectangle(px, py, CELL_SIZE, CELL_SIZE, cellColor);
+        }
+    }
+
+    // Draw walls
+    for (int y = 0; y < mazeHeight; y++) {
+        for (int x = 0; x < mazeWidth; x++) {
+            int px = offsetX + x * CELL_SIZE;
+            int py = offsetY + y * CELL_SIZE;
+
+            if (maze[y][x].walls[0]) {
+                DrawRectangle(px, py, CELL_SIZE, WALL_THICKNESS, BLACK);
+            }
+            if (maze[y][x].walls[1]) {
+                DrawRectangle(px + CELL_SIZE - WALL_THICKNESS, py, WALL_THICKNESS, CELL_SIZE, BLACK);
+            }
+            if (maze[y][x].walls[2]) {
+                DrawRectangle(px, py + CELL_SIZE - WALL_THICKNESS, CELL_SIZE, WALL_THICKNESS, BLACK);
+            }
+            if (maze[y][x].walls[3]) {
+                DrawRectangle(px, py, WALL_THICKNESS, CELL_SIZE, BLACK);
+            }
+        }
+    }
+
+    // Draw outer border
+    int totalWidth = mazeWidth * CELL_SIZE;
+    int totalHeight = mazeHeight * CELL_SIZE;
+    DrawRectangle(offsetX, offsetY, totalWidth, WALL_THICKNESS, BLACK);
+    DrawRectangle(offsetX + totalWidth - WALL_THICKNESS, offsetY, WALL_THICKNESS, totalHeight, BLACK);
+    DrawRectangle(offsetX, offsetY + totalHeight - WALL_THICKNESS, totalWidth, WALL_THICKNESS, BLACK);
+    DrawRectangle(offsetX, offsetY, WALL_THICKNESS, totalHeight, BLACK);
+
+    // Draw start and end
+    DrawRectangle(offsetX + 2, offsetY + 2, CELL_SIZE - 4, CELL_SIZE - 4, GREEN);
+    DrawRectangle(offsetX + (mazeWidth - 1) * CELL_SIZE + 2,
+        offsetY + (mazeHeight - 1) * CELL_SIZE + 2,
+        CELL_SIZE - 4, CELL_SIZE - 4, RED);
+
+    // Draw player
+    if (currentMode == PLAYER_NAVIGATION) {
+        int px = offsetX + playerX * CELL_SIZE + CELL_SIZE / 4;
+        int py = offsetY + playerY * CELL_SIZE + CELL_SIZE / 4;
+        DrawCircle(px + CELL_SIZE / 4, py + CELL_SIZE / 4, CELL_SIZE / 3, BLUE);
+    }
+}
+
+int main() {
+    srand((unsigned int)time(NULL));
+
+    const int screenWidth = 1980;
+    const int screenHeight = 900;
+
+    InitWindow(screenWidth, screenHeight, "2D Maze Generator - Advanced Features");
+    SetTargetFPS(60);
+
+    mazeWidth = DIFFICULTY_SIZES[currentDifficulty];
+    mazeHeight = DIFFICULTY_SIZES[currentDifficulty];
+    GenerateMaze();
+
+    while (!WindowShouldClose()) {
+        // Regenerate maze
+        if (IsKeyPressed(KEY_R)) {
+            GenerateMaze();
+        }
+
+        // Change difficulty
+        if (IsKeyPressed(KEY_ONE)) {
+            currentDifficulty = EASY;
+            mazeWidth = mazeHeight = DIFFICULTY_SIZES[EASY];
+            GenerateMaze();
+        }
+        if (IsKeyPressed(KEY_TWO)) {
+            currentDifficulty = MEDIUM;
+            mazeWidth = mazeHeight = DIFFICULTY_SIZES[MEDIUM];
+            GenerateMaze();
+        }
+        if (IsKeyPressed(KEY_THREE)) {
+            currentDifficulty = HARD;
+            mazeWidth = mazeHeight = DIFFICULTY_SIZES[HARD];
+            GenerateMaze();
+        }
+
+        // Change algorithm
+        if (IsKeyPressed(KEY_Q)) {
+            currentAlgorithm = (Algorithm)((currentAlgorithm + 1) % 3);
+            GenerateMaze();
+        }
+
+        // Toggle mode
+        if (IsKeyPressed(KEY_TAB)) {
+            currentMode = (GameMode)((currentMode + 1) % 2);
+            if (currentMode == SOLVER_VISUALIZATION) {
+                SolveMaze();
+            }
+        }
+
+        // Solve maze
+        if (IsKeyPressed(KEY_SPACE) && currentMode == SOLVER_VISUALIZATION) {
+            SolveMaze();
+        }
+
+        // Update player
+        if (currentMode == PLAYER_NAVIGATION) {
+            UpdatePlayer();
+        }
+
+        Vector2 mousePos = GetMousePosition();
+        bool mouseClicked = IsMouseButtonPressed(MOUSE_LEFT_BUTTON);
+
+        BeginDrawing();
+        ClearBackground(BLACK);
+        DrawRectangleGradientV(0, 0, screenWidth, screenHeight, BG_TOP, BG_BOTTOM);
+
+        // Calculate offset to center the maze
+        int mazeWidthPx = mazeWidth * CELL_SIZE;
+        int mazeHeightPx = mazeHeight * CELL_SIZE;
+        int offsetX = (screenWidth - mazeWidthPx) / 2;
+        int offsetY = 100;
+
+        Rectangle mazeCard = { (float)offsetX - 25.0f, (float)offsetY - 25.0f, (float)mazeWidthPx + 50.0f, (float)mazeHeightPx + 50.0f };
+        DrawRectangleRounded(mazeCard, 0.05f, 8, MakeColor(10, 12, 20, 160));
+        DrawRectangleRoundedLines(mazeCard, 0.05f, 8, MakeColor(255, 255, 255, 35));
+
+        DrawMaze(offsetX, offsetY);
+
+        Rectangle panel = { 40.0f, 80.0f, 360.0f, (float)screenHeight - 160.0f };
+        DrawRectangleRounded(panel, 0.08f, 8, PANEL_BG);
+        DrawRectangleRoundedLines(panel, 0.08f, 8, PANEL_BORDER);
+
+        float panelY = panel.y + 30.0f;
+        DrawText("Maze Lab", (int)panel.x + 30, (int)panelY, 28, PANEL_TEXT);
+        panelY += 45.0f;
+
+        DrawText("Difficulty", (int)panel.x + 30, (int)panelY, 20, PANEL_MUTED);
+        panelY += 30.0f;
+        for (int i = 0; i < 3; i++) {
+            Rectangle btn = { panel.x + 30.0f, panelY, panel.width - 60.0f, 36.0f };
+            if (DrawUIButton(btn, DIFFICULTY_NAMES[i], currentDifficulty == (Difficulty)i, mousePos, mouseClicked)) {
+                if (currentDifficulty != (Difficulty)i) {
+                    currentDifficulty = (Difficulty)i;
+                    mazeWidth = mazeHeight = DIFFICULTY_SIZES[i];
+                    GenerateMaze();
+                }
+            }
+            panelY += 44.0f;
+        }
+
+        panelY += 6.0f;
+        DrawText("Algorithm", (int)panel.x + 30, (int)panelY, 20, PANEL_MUTED);
+        panelY += 30.0f;
+        for (int i = 0; i < 3; i++) {
+            Rectangle btn = { panel.x + 30.0f, panelY, panel.width - 60.0f, 36.0f };
+            if (DrawUIButton(btn, ALGORITHM_NAMES[i], currentAlgorithm == (Algorithm)i, mousePos, mouseClicked)) {
+                if (currentAlgorithm != (Algorithm)i) {
+                    currentAlgorithm = (Algorithm)i;
+                    GenerateMaze();
+                }
+            }
+            panelY += 44.0f;
+        }
+
+        panelY += 6.0f;
+        DrawText("Mode", (int)panel.x + 30, (int)panelY, 20, PANEL_MUTED);
+        panelY += 30.0f;
+        const char* modeLabel = currentMode == PLAYER_NAVIGATION ? "Player Navigation" : "Solver Visualization";
+        Rectangle modeBtn = { panel.x + 30.0f, panelY, panel.width - 60.0f, 40.0f };
+        if (DrawUIButton(modeBtn, modeLabel, true, mousePos, mouseClicked)) {
+            currentMode = currentMode == PLAYER_NAVIGATION ? SOLVER_VISUALIZATION : PLAYER_NAVIGATION;
+            if (currentMode == SOLVER_VISUALIZATION) {
+                SolveMaze();
+            }
+        }
+        panelY += 50.0f;
+
+        DrawText("Actions", (int)panel.x + 30, (int)panelY, 20, PANEL_MUTED);
+        panelY += 30.0f;
+
+        Rectangle regenBtn = { panel.x + 30.0f, panelY, panel.width - 60.0f, 38.0f };
+        if (DrawUIButton(regenBtn, "Regenerate Maze", false, mousePos, mouseClicked)) {
+            GenerateMaze();
+        }
+        panelY += 46.0f;
+
+        if (currentMode == SOLVER_VISUALIZATION) {
+            Rectangle solveBtn = { panel.x + 30.0f, panelY, panel.width - 60.0f, 38.0f };
+            if (DrawUIButton(solveBtn, "Solve Again", false, mousePos, mouseClicked)) {
+                SolveMaze();
+            }
+            panelY += 46.0f;
+        }
+
+        DrawText("Stats", (int)panel.x + 30, (int)panelY, 20, PANEL_MUTED);
+        panelY += 28.0f;
+
+        char info[256];
+        sprintf(info, "Grid: %dx%d", mazeWidth, mazeHeight);
+        DrawText(info, (int)panel.x + 30, (int)panelY, 18, PANEL_TEXT);
+        panelY += 24.0f;
+        sprintf(info, "Algorithm: %s", ALGORITHM_NAMES[currentAlgorithm]);
+        DrawText(info, (int)panel.x + 30, (int)panelY, 16, PANEL_TEXT);
+        panelY += 24.0f;
+        sprintf(info, "Mode: %s", currentMode == PLAYER_NAVIGATION ? "Player" : "Solver");
+        DrawText(info, (int)panel.x + 30, (int)panelY, 16, PANEL_TEXT);
+        panelY += 24.0f;
+        if (currentMode == SOLVER_VISUALIZATION) {
+            sprintf(info, "Current path: %d cells", (int)solutionPath.size());
+            DrawText(info, (int)panel.x + 30, (int)panelY, 16, PANEL_TEXT);
+        }
+
+        DrawText("Hotkeys: 1/2/3 (difficulty), Q (algorithm), TAB (mode), R (regen)", 40, screenHeight - 60, 18, PANEL_MUTED);
+        DrawText("WASD / Arrow keys to move ï¿½ SPACE solves in solver mode", 40, screenHeight - 36, 18, PANEL_MUTED);
+
+        DrawFPS(screenWidth - 100, 15);
+
+        EndDrawing();
+    }
+
+    CloseWindow();
+    return 0;
+}
